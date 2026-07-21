@@ -10,6 +10,7 @@ from app.core.merge import MergeQueue
 from app.core.outcomes import OutcomesStore
 from app.core.scheduler import Scheduler
 from app.core.session_manager import SessionManager
+from app.core.task_registry import TaskRegistry
 from app.core.worktrees import WorktreeManager
 from app.db import Database, init_db
 
@@ -31,6 +32,7 @@ class AppServices:
     merge_queue: MergeQueue
     scheduler: Scheduler
     sessions: SessionManager
+    task_registry: TaskRegistry
 
 
 def build_services(settings: Settings) -> AppServices:
@@ -52,9 +54,12 @@ def build_services(settings: Settings) -> AppServices:
         merge_queue=merge_queue,
         claude_bin=settings.claude_bin,
         base_branch=settings.base_branch,
+        max_agents=settings.max_agents,
     )
     sessions = SessionManager(db, worktrees)
+    task_registry = TaskRegistry()
     return AppServices(
         settings=settings, db=db, worktrees=worktrees, artifacts=artifacts, approvals=approvals,
         outcomes=outcomes, cost=cost, merge_queue=merge_queue, scheduler=scheduler, sessions=sessions,
+        task_registry=task_registry,
     )

@@ -100,3 +100,41 @@ async def test_full_flow_via_rest(client: httpx.AsyncClient):
     r = await client.get(f"/api/tasks/{final_tasks[0]['id']}", headers=AUTH)
     kinds = {a["kind"] for a in r.json()["artifacts"]}
     assert {"diff", "review", "test_report"} <= kinds
+
+
+@pytest.mark.asyncio
+async def test_killing_session_cancels_in_flight_planner_call(client: httpx.AsyncClient, monkeypatch):
+    """Closing a session must actually stop in-flight agent work, not just
+    relabel it - otherwise a killed session leaves an orphaned claude
+    subprocess running with nothing left tracking or displaying it.
+    """
+    started = asyncio.Event()
+    cancelled = False
+
+    async def slow_planner(prompt, *, cwd, role, **kwargs):
+        nonlocal cancelled
+        started.set()
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
+        raise AssertionError("should have been cancelled before returning")
+
+    monkeypatch.setattr(scheduler_module, "run_claude", slow_planner)
+
+    r = await client.post("/api/sessions", json={"title": "will be killed"}, headers=AUTH)
+    session_id = r.json()["id"]
+
+    r = await client.post(f"/api/sessions/{session_id}/request", json={"text": "do something slow"}, headers=AUTH)
+    assert r.status_code == 200
+
+    await asyncio.wait_for(started.wait(), timeout=5)
+
+    r = await client.post(f"/api/sessions/{session_id}/close", headers=AUTH)
+    assert r.status_code == 200
+
+    assert cancelled is True
+
+    r = await client.get("/api/approvals", headers=AUTH)
+    assert all(a["session_id"] != session_id for a in r.json())

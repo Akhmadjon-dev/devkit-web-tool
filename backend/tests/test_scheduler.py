@@ -207,3 +207,204 @@ async def test_task_rejected_records_outcome_and_does_not_merge(services, repo, 
 
     log = await run_git("log", "--oneline", "main", cwd=repo)
     assert "add hello.txt" not in log
+
+
+@pytest.mark.asyncio
+async def test_independent_tasks_run_concurrently(services, repo, monkeypatch):
+    """Two tasks with no depends_on relationship between them should both
+    reach gate 2 before either is resolved - proving the scheduler dispatches
+    them concurrently rather than waiting for the first to fully finish
+    (including its human-approval wait) before starting the second.
+    """
+
+    async def fake_run_claude_two_tasks(
+        prompt, *, cwd, role, claude_bin="claude", max_budget_usd=None, add_dirs=None,
+        resume_session_id=None, timeout_seconds=None, on_event=None,
+    ):
+        if role is PLANNER_ROLE:
+            plan = {
+                "tasks": [
+                    {"id": "a", "title": "add a.txt", "spec": "create a.txt", "role": "engineer", "branch": "feat/a", "depends_on": []},
+                    {"id": "b", "title": "add b.txt", "spec": "create b.txt", "role": "engineer", "branch": "feat/b", "depends_on": []},
+                ]
+            }
+            return make_result(structured=plan)
+        if role is ENGINEER_ROLE:
+            fname = "a.txt" if "a.txt" in prompt else "b.txt"
+            (Path(cwd) / fname).write_text("x")
+            await run_git("add", fname, cwd=Path(cwd))
+            await run_git("-c", "user.email=t@t.com", "-c", "user.name=t", "commit", "-q", "-m", f"add {fname}", cwd=Path(cwd))
+            return make_result(structured=None, ok=True)
+        if role is REVIEWER_ROLE:
+            return make_result(structured={"verdict": "approve", "issues": [], "notes": "ok"})
+        raise AssertionError(role)
+
+    monkeypatch.setattr(scheduler_module, "run_claude", fake_run_claude_two_tasks)
+
+    session = await services.sessions.create("two independent tasks")
+    _, plan_approval_id = await services.scheduler.submit_request(session, "add a.txt and b.txt")
+    plan, id_map = await services.scheduler.resolve_plan(session, plan_approval_id, approved=True)
+
+    runner = asyncio.create_task(services.scheduler.run_all_tasks(session, plan, id_map))
+
+    both_pending = False
+    for _ in range(2000):
+        rows = services.db.fetch_all(
+            "SELECT * FROM approvals WHERE step_kind = 'task' AND status = 'pending'"
+        )
+        if len(rows) == 2:
+            both_pending = True
+            break
+        await asyncio.sleep(0.01)
+    assert both_pending, "both independent tasks should reach gate 2 concurrently"
+
+    pending_rows = services.db.fetch_all("SELECT * FROM approvals WHERE step_kind = 'task' AND status = 'pending'")
+    for row in pending_rows:
+        await services.approvals.resolve(row["id"], ApprovalStatus.approved)
+    await runner
+
+    statuses = {r["title"]: r["status"] for r in services.db.fetch_all("SELECT title, status FROM tasks")}
+    assert statuses == {"add a.txt": "done", "add b.txt": "done"}
+
+
+@pytest.mark.asyncio
+async def test_agent_semaphore_caps_concurrent_claude_calls(tmp_path, repo, monkeypatch):
+    from app.config import Settings
+    from app.services import build_services
+
+    settings = Settings(repo_root=repo, data_dir=tmp_path / "data", token="test-token", max_agents=1)
+    services = build_services(settings)
+
+    concurrent = 0
+    max_seen = 0
+    lock = asyncio.Lock()
+
+    async def fake_run_claude_tracks_concurrency(
+        prompt, *, cwd, role, claude_bin="claude", max_budget_usd=None, add_dirs=None,
+        resume_session_id=None, timeout_seconds=None, on_event=None,
+    ):
+        nonlocal concurrent, max_seen
+        async with lock:
+            concurrent += 1
+            max_seen = max(max_seen, concurrent)
+        await asyncio.sleep(0.05)
+        async with lock:
+            concurrent -= 1
+
+        if role is PLANNER_ROLE:
+            plan = {
+                "tasks": [
+                    {"id": "a", "title": "task a", "spec": "x", "role": "engineer", "branch": "feat/a", "depends_on": []},
+                    {"id": "b", "title": "task b", "spec": "y", "role": "engineer", "branch": "feat/b", "depends_on": []},
+                ]
+            }
+            return make_result(structured=plan)
+        if role is ENGINEER_ROLE:
+            fname = Path(cwd).name + ".txt"
+            (Path(cwd) / fname).write_text("x")
+            await run_git("add", fname, cwd=Path(cwd))
+            await run_git("-c", "user.email=t@t.com", "-c", "user.name=t", "commit", "-q", "-m", "add file", cwd=Path(cwd))
+            return make_result(structured=None, ok=True)
+        if role is REVIEWER_ROLE:
+            return make_result(structured={"verdict": "approve", "issues": [], "notes": "ok"})
+        raise AssertionError(role)
+
+    monkeypatch.setattr(scheduler_module, "run_claude", fake_run_claude_tracks_concurrency)
+
+    session = await services.sessions.create("semaphore test")
+    _, plan_approval_id = await services.scheduler.submit_request(session, "two tasks")
+    plan, id_map = await services.scheduler.resolve_plan(session, plan_approval_id, approved=True)
+
+    runner = asyncio.create_task(services.scheduler.run_all_tasks(session, plan, id_map))
+    for _ in range(2000):
+        rows = services.db.fetch_all("SELECT * FROM approvals WHERE step_kind = 'task' AND status = 'pending'")
+        if len(rows) == 2:
+            break
+        await asyncio.sleep(0.01)
+    for row in services.db.fetch_all("SELECT * FROM approvals WHERE step_kind = 'task' AND status = 'pending'"):
+        await services.approvals.resolve(row["id"], ApprovalStatus.approved)
+    await runner
+
+    assert max_seen == 1, f"max_agents=1 should cap concurrent claude calls at 1, saw {max_seen}"
+
+
+@pytest.mark.asyncio
+async def test_two_parallel_orchestrator_sessions_both_merge_cleanly(services, repo, monkeypatch):
+    """The Phase 3 checkpoint, in code: two independent orchestrator sessions
+    (not just two tasks in one plan) running at once, each parking for its own
+    approval, both triaged and merged - proving session-level isolation (each
+    gets its own worktree/branch) plus the merge queue's serialization hold
+    even when two completely separate pipelines are in flight simultaneously.
+
+    monkeypatch replaces the single module-level `run_claude` name, so both
+    sessions' calls funnel through one fake - it dispatches on prompt content
+    (which filename to write) rather than closing over per-session state, so
+    the two sessions genuinely running concurrently can't clobber each other.
+    """
+
+    async def fake_run_claude_two_sessions(
+        prompt, *, cwd, role, claude_bin="claude", max_budget_usd=None, add_dirs=None,
+        resume_session_id=None, timeout_seconds=None, on_event=None,
+    ):
+        filename = "alpha.txt" if "alpha" in prompt else "beta.txt"
+        if role is PLANNER_ROLE:
+            plan = {
+                "tasks": [{
+                    "id": "t1", "title": f"add {filename}", "spec": f"create {filename}",
+                    "role": "engineer", "branch": f"feat/{filename}", "depends_on": [],
+                }]
+            }
+            return make_result(structured=plan)
+        if role is ENGINEER_ROLE:
+            (Path(cwd) / filename).write_text("x")
+            await run_git("add", filename, cwd=Path(cwd))
+            await run_git("-c", "user.email=t@t.com", "-c", "user.name=t", "commit", "-q", "-m", f"add {filename}", cwd=Path(cwd))
+            return make_result(structured=None, ok=True)
+        if role is REVIEWER_ROLE:
+            return make_result(structured={"verdict": "approve", "issues": [], "notes": "ok"})
+        raise AssertionError(role)
+
+    monkeypatch.setattr(scheduler_module, "run_claude", fake_run_claude_two_sessions)
+
+    async def dispatch(*, request_text: str) -> str:
+        """Runs one full session's request -> plan -> gate1 for real; returns its task id."""
+        session = await services.sessions.create(request_text)
+        _, plan_approval_id = await services.scheduler.submit_request(session, request_text)
+        plan, id_map = await services.scheduler.resolve_plan(session, plan_approval_id, approved=True)
+        asyncio.create_task(services.scheduler.run_all_tasks(session, plan, id_map))
+        return id_map["t1"]
+
+    # Both orchestrators genuinely in flight at once.
+    task_a, task_b = await asyncio.gather(
+        dispatch(request_text="add alpha file"),
+        dispatch(request_text="add beta file"),
+    )
+
+    pending: dict[str, str] = {}
+    for _ in range(3000):
+        rows = services.db.fetch_all("SELECT * FROM approvals WHERE step_kind = 'task' AND status = 'pending'")
+        for r in rows:
+            pending[r["task_id"]] = r["id"]
+        if task_a in pending and task_b in pending:
+            break
+        await asyncio.sleep(0.01)
+    assert task_a in pending and task_b in pending, "both orchestrator sessions should park for approval"
+
+    # Triage both from the global queue, in an arbitrary order.
+    await services.approvals.resolve(pending[task_b], ApprovalStatus.approved)
+    await services.approvals.resolve(pending[task_a], ApprovalStatus.approved)
+
+    for _ in range(3000):
+        statuses = {
+            r["id"]: r["status"]
+            for r in services.db.fetch_all("SELECT id, status FROM tasks WHERE id IN (?, ?)", (task_a, task_b))
+        }
+        if statuses.get(task_a) == "done" and statuses.get(task_b) == "done":
+            break
+        await asyncio.sleep(0.01)
+    assert statuses[task_a] == "done"
+    assert statuses[task_b] == "done"
+
+    log = await run_git("log", "--oneline", "main", cwd=repo)
+    assert "alpha.txt" in log
+    assert "beta.txt" in log

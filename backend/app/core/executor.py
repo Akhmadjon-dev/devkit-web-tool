@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 from dataclasses import dataclass, field
@@ -247,6 +248,13 @@ async def run_claude(
         proc.kill()
         await proc.wait()
         raise ExecutorError(f"claude invocation timed out after {timeout_seconds}s", stderr=stderr_text)
+    except asyncio.CancelledError:
+        # The caller (e.g. a killed session) is tearing us down - don't leave
+        # an orphaned `claude` subprocess running in the background.
+        proc.kill()
+        with contextlib.suppress(Exception):
+            await proc.wait()
+        raise
 
     if returncode != 0 and not events and not stdout_text.strip():
         # Nothing at all to work with (binary missing, immediate crash, etc).

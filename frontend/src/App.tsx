@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "./api/client";
 import { TokenGate } from "./components/TokenGate";
@@ -11,9 +11,16 @@ import { WorktreesPanel } from "./components/WorktreesPanel";
 function Shell() {
   const [activeId, setActiveId] = useState<string | null>(null);
   const { data: sessions } = useQuery({ queryKey: ["sessions"], queryFn: api.listSessions });
+  // Only auto-pick a session on first load. Without this guard, killing the
+  // active session (which sets activeId back to null) races the sessions
+  // list refetch: this effect would see the still-stale cached list (which
+  // still includes the just-closed session) and immediately re-select it,
+  // undoing the kill from the UI's perspective.
+  const autoSelectedRef = useRef(false);
 
   useEffect(() => {
-    if (!activeId && sessions && sessions.length > 0) {
+    if (!autoSelectedRef.current && !activeId && sessions && sessions.length > 0) {
+      autoSelectedRef.current = true;
       setActiveId(sessions[0].id);
     }
   }, [sessions, activeId]);
@@ -27,7 +34,7 @@ function Shell() {
       <div className="flex flex-1 min-h-0">
         <main className="flex-1 min-w-0 border-r border-[#24282f]">
           {activeId ? (
-            <SessionChat key={activeId} sessionId={activeId} />
+            <SessionChat key={activeId} sessionId={activeId} onClosed={() => setActiveId(null)} />
           ) : (
             <div className="flex h-full items-center justify-center text-sm text-gray-500">
               Create a session to get started.

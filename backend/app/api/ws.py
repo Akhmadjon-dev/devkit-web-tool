@@ -71,3 +71,11 @@ async def ws_cost(ws: WebSocket) -> None:
     if not await _authorized(ws):
         return
     await _pump(ws, "cost")
+
+
+@router.websocket("/ws/worktrees")
+async def ws_worktrees(ws: WebSocket) -> None:
+    await ws.accept()
+    if not await _authorized(ws):
+        return
+    await _pump(ws, "worktrees")

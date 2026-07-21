@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.config import get_settings
+from app.core.reconcile import reconcile_on_startup
 from app.core.scheduler import SchedulerError
 from app.core.worktrees import WorktreeError
 from app.services import build_services
@@ -27,6 +28,7 @@ def create_app() -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         app.state.services = build_services(settings)
+        await reconcile_on_startup(app.state.services)
         logger.info("devworkspace ready on %s:%s (repo=%s)", settings.host, settings.port, settings.repo_root)
         logger.info("open the app: http://localhost:%s/?token=%s", FRONTEND_DEV_PORT, token)
         yield

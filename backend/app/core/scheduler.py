@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -49,6 +50,7 @@ class Scheduler:
         merge_queue: MergeQueue,
         claude_bin: str = "claude",
         base_branch: str = "main",
+        max_agents: int = 3,
     ):
         self.db = db
         self.worktrees = worktrees
@@ -59,6 +61,15 @@ class Scheduler:
         self.merge_queue = merge_queue
         self.claude_bin = claude_bin
         self.base_branch = base_branch
+        # Caps concurrent `claude` subprocesses across ALL sessions and tasks
+        # in this process - parallelism is safe (each gets its own worktree)
+        # but unbounded parallelism just burns cost/API rate limits for no
+        # benefit once you're waiting on approvals anyway.
+        self._agent_semaphore = asyncio.Semaphore(max_agents)
+
+    async def _run_claude_limited(self, *args, **kwargs):
+        async with self._agent_semaphore:
+            return await run_claude(*args, **kwargs)
 
     # -- Planner step + gate 1 -------------------------------------------
 
@@ -72,7 +83,7 @@ class Scheduler:
         )
         t0 = time.monotonic()
         try:
-            result = await run_claude(
+            result = await self._run_claude_limited(
                 prompt, cwd=session.worktree_path, role=PLANNER_ROLE, claude_bin=self.claude_bin
             )
         except ExecutorError as e:
@@ -143,8 +154,11 @@ class Scheduler:
     # -- Task pipeline: engineer -> reviewer -> gate 2 -> merge ----------
 
     async def run_all_tasks(self, session: Session, plan: Plan, id_map: dict[str, str]) -> None:
-        """Sequential dispatch respecting depends_on (Phase 1). Phase 3 adds a
-        concurrency-capped semaphore for running independent tasks in parallel.
+        """Dispatch tasks respecting depends_on. Tasks with no dependency
+        relationship between them run concurrently (each in its own worktree -
+        safe by construction); the agent semaphore caps how many `claude`
+        subprocesses run at once across the whole process, and the merge
+        queue's own lock serializes the merges regardless of dispatch order.
         """
         resolved = {
             id_map[t.id]: ResolvedTask(id=id_map[t.id], plan_task=t, depends_on=[id_map[d] for d in t.depends_on if d in id_map])
@@ -171,17 +185,21 @@ class Scheduler:
             if not ready:
                 raise SchedulerError("unsatisfiable or circular depends_on in plan")
             for rt in ready:
-                try:
-                    await self.run_task(session, rt)
-                except Exception as e:  # noqa: BLE001 - a bug in one task must not kill the whole pipeline
-                    logger.exception("unexpected error running task %s", rt.id)
-                    await self._escalate(session, rt.id, FailureClass.escalated, f"unexpected error: {e}")
                 del remaining[rt.id]
-                row = self.db.fetch_one("SELECT status FROM tasks WHERE id = ?", (rt.id,))
-                if row is not None and row["status"] == TaskStatus.done.value:
-                    done.add(rt.id)
-                else:
-                    blocked.add(rt.id)
+
+            await asyncio.gather(*(self._run_task_tracked(session, rt, done, blocked) for rt in ready))
+
+    async def _run_task_tracked(self, session: Session, rt: ResolvedTask, done: set[str], blocked: set[str]) -> None:
+        try:
+            await self.run_task(session, rt)
+        except Exception as e:  # noqa: BLE001 - a bug in one task must not kill the whole pipeline
+            logger.exception("unexpected error running task %s", rt.id)
+            await self._escalate(session, rt.id, FailureClass.escalated, f"unexpected error: {e}")
+        row = self.db.fetch_one("SELECT status FROM tasks WHERE id = ?", (rt.id,))
+        if row is not None and row["status"] == TaskStatus.done.value:
+            done.add(rt.id)
+        else:
+            blocked.add(rt.id)
 
     async def _set_task_status(self, task_id: str, status: TaskStatus, **extra) -> None:
         cols = ["status = ?"]
@@ -215,13 +233,14 @@ class Scheduler:
             "INSERT INTO worktrees (id, branch, path, session_id, status) VALUES (?, ?, ?, ?, 'active')",
             (new_id("wt"), wt.branch, str(wt.path), session.id),
         )
+        bus.publish("worktrees", {"event": "changed"})
 
         async def on_event(event: dict) -> None:
             bus.publish(f"session:{session.id}", {"event": "agent_event", "task_id": task_id, "payload": event})
 
         t0 = time.monotonic()
         try:
-            result = await run_claude(
+            result = await self._run_claude_limited(
                 plan_task.spec, cwd=wt.path, role=ENGINEER_ROLE, claude_bin=self.claude_bin, on_event=on_event
             )
         except ExecutorError as e:
@@ -268,7 +287,7 @@ class Scheduler:
         )
         t0 = time.monotonic()
         try:
-            result = await run_claude(prompt, cwd=worktree_path, role=REVIEWER_ROLE, claude_bin=self.claude_bin)
+            result = await self._run_claude_limited(prompt, cwd=worktree_path, role=REVIEWER_ROLE, claude_bin=self.claude_bin)
         except ExecutorError as e:
             logger.warning("reviewer invocation failed for task %s: %s", task_id, e)
             return None
@@ -303,6 +322,7 @@ class Scheduler:
         bus.publish(f"session:{session.id}", {"event": "task_done", "task_id": task_id})
         await self.worktrees.remove(worktree_path)
         await self.db.execute("UPDATE worktrees SET status = 'removed' WHERE path = ?", (str(worktree_path),))
+        bus.publish("worktrees", {"event": "changed"})
 
     async def _escalate(self, session: Session, task_id: str, failure_class: FailureClass, reason: str) -> None:
         await self._set_task_status(task_id, TaskStatus.escalated)

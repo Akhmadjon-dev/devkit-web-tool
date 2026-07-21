@@ -42,6 +42,7 @@ class SessionManager:
             (new_id("wt"), wt.branch, str(wt.path), session_id),
         )
         bus.publish("sessions", {"event": "session_created", "session_id": session_id, "title": title})
+        bus.publish("worktrees", {"event": "changed"})
         return Session(id=session_id, title=title, branch=wt.branch, worktree_path=str(wt.path), status=SessionStatus.active)
 
     def get(self, session_id: str) -> Session | None:
@@ -69,3 +70,4 @@ class SessionManager:
             await self.db.execute("UPDATE worktrees SET status = 'removed' WHERE session_id = ?", (session_id,))
         await self.db.execute("UPDATE sessions SET status = ? WHERE id = ?", (SessionStatus.closed.value, session_id))
         bus.publish("sessions", {"event": "session_closed", "session_id": session_id})
+        bus.publish("worktrees", {"event": "changed"})

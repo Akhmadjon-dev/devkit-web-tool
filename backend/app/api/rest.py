@@ -6,6 +6,7 @@ import logging
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
+from app.core.reconcile import cleanup_orphaned_worktrees
 from app.core.scheduler import SchedulerError
 from app.models import ApprovalStatus, Plan
 from app.services import AppServices
@@ -69,7 +70,11 @@ async def get_session(session_id: str, request: Request) -> dict:
 
 @router.post("/sessions/{session_id}/close")
 async def close_session(session_id: str, request: Request) -> dict:
+    """Closing a session kills it: any in-flight planner/engineer/reviewer
+    work for it is cancelled (not just relabeled), then its worktree is removed.
+    """
     services = _services(request)
+    await services.task_registry.cancel_session(session_id)
     try:
         await services.sessions.close(session_id)
     except KeyError:
@@ -100,8 +105,10 @@ async def submit_request(session_id: str, body: SubmitRequestBody, request: Requ
             from app.bus import bus
 
             bus.publish(f"session:{session_id}", {"event": "planner_failed", "detail": str(e)})
+        except asyncio.CancelledError:
+            pass
 
-    asyncio.create_task(_run())
+    services.task_registry.track(session_id, asyncio.create_task(_run()))
     return {"status": "planning"}
 
 
@@ -162,7 +169,8 @@ async def decide_approval(approval_id: str, body: DecisionBody, request: Request
         except SchedulerError as e:
             raise HTTPException(400, str(e))
         if body.approved and plan is not None:
-            asyncio.create_task(services.scheduler.run_all_tasks(session, plan, id_map))
+            task = asyncio.create_task(services.scheduler.run_all_tasks(session, plan, id_map))
+            services.task_registry.track(session.id, task)
         return {"ok": True, "step_kind": "plan"}
 
     # step_kind == "task": the scheduler's run_task() is already parked on
@@ -194,3 +202,14 @@ async def list_worktrees(request: Request) -> list[dict]:
     services = _services(request)
     rows = services.db.fetch_all("SELECT * FROM worktrees ORDER BY id")
     return [dict(r) for r in rows]
+
+
+@router.post("/worktrees/cleanup")
+async def cleanup_worktrees(request: Request) -> dict:
+    """Removes worktrees that exist on disk but are orphaned - untracked, or
+    left over from a session that was closed/crashed before its own cleanup
+    ran. Safe to call anytime; never touches the repo's primary checkout.
+    """
+    services = _services(request)
+    removed = await cleanup_orphaned_worktrees(services)
+    return {"removed": removed}

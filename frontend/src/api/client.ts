@@ -78,6 +78,7 @@ export const api = {
     ),
   cost: () => apiFetch<CostSummary>("/api/cost"),
   worktrees: () => apiFetch<WorktreeRow[]>("/api/worktrees"),
+  cleanupWorktrees: () => apiFetch<{ removed: string[] }>("/api/worktrees/cleanup", { method: "POST" }),
 };
 
 export { ApiError };

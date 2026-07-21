@@ -41,11 +41,12 @@ function describeEvent(event: Record<string, unknown>): string | null {
   }
 }
 
-export function SessionChat({ sessionId }: { sessionId: string }) {
+export function SessionChat({ sessionId, onClosed }: { sessionId: string; onClosed: () => void }) {
   const qc = useQueryClient();
   const [logs, setLogs] = useState<LogLine[]>([]);
   const [request, setRequest] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [killing, setKilling] = useState(false);
   const logEndRef = useRef<HTMLDivElement>(null);
 
   const { data: session } = useQuery({
@@ -108,13 +109,35 @@ export function SessionChat({ sessionId }: { sessionId: string }) {
     }
   };
 
+  const killSession = async () => {
+    if (!confirm("Kill this session? Any in-flight agent work is cancelled and its worktree removed.")) return;
+    setKilling(true);
+    try {
+      await api.closeSession(sessionId);
+      qc.invalidateQueries({ queryKey: ["sessions"] });
+      qc.invalidateQueries({ queryKey: ["worktrees"] });
+      onClosed();
+    } finally {
+      setKilling(false);
+    }
+  };
+
   if (!session) return <div className="p-4 text-sm text-gray-500">loading...</div>;
 
   return (
     <div className="flex h-full flex-col">
-      <div className="border-b border-[#24282f] px-4 py-3">
-        <div className="text-sm font-medium text-white">{session.title}</div>
-        <div className="text-xs text-gray-500 font-mono">{session.branch}</div>
+      <div className="border-b border-[#24282f] px-4 py-3 flex items-center justify-between">
+        <div>
+          <div className="text-sm font-medium text-white">{session.title}</div>
+          <div className="text-xs text-gray-500 font-mono">{session.branch}</div>
+        </div>
+        <button
+          onClick={killSession}
+          disabled={killing}
+          className="text-xs text-red-400 hover:text-red-300 disabled:opacity-50"
+        >
+          {killing ? "killing..." : "kill session"}
+        </button>
       </div>
 
       <div className="flex-1 overflow-y-auto px-4 py-3 space-y-3">
