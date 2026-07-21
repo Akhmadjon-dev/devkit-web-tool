@@ -24,6 +24,10 @@ class Settings(BaseSettings):
     # Path/name of the Claude Code CLI binary.
     claude_bin: str = "claude"
 
+    # The branch tasks are based off of and merge back into. Override if your
+    # repo's default branch isn't "main" (e.g. DEVWORKSPACE_BASE_BRANCH=master).
+    base_branch: str = "main"
+
     # Concurrency cap for running agents at once (Phase 3).
     max_agents: int = 3
 

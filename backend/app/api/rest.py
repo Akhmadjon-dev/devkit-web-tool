@@ -29,13 +29,14 @@ async def ping() -> dict:
 
 class CreateSessionRequest(BaseModel):
     title: str
-    base_branch: str = "main"
+    base_branch: str | None = None
 
 
 @router.post("/sessions")
 async def create_session(body: CreateSessionRequest, request: Request) -> dict:
     services = _services(request)
-    session = await services.sessions.create(body.title, base_branch=body.base_branch)
+    base_branch = body.base_branch or services.settings.base_branch
+    session = await services.sessions.create(body.title, base_branch=base_branch)
     return {
         "id": session.id, "title": session.title, "branch": session.branch,
         "worktree_path": session.worktree_path, "status": session.status.value,

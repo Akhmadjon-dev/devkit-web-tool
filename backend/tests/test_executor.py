@@ -78,3 +78,36 @@ def test_extract_result_fields_non_json_text_result():
     fields = _extract_result_fields(payload)
     assert fields["structured"] is None
     assert fields["result_text"] == "just some plain text, not json"
+
+
+def test_extract_result_fields_real_json_schema_envelope():
+    """Real `claude -p --output-format json --json-schema ...` envelope, captured
+    live: --json-schema output lands in `structured_output`, not `result`.
+    """
+    payload = {
+        "type": "result",
+        "subtype": "success",
+        "is_error": False,
+        "duration_ms": 7333,
+        "num_turns": 2,
+        "result": "",
+        "session_id": "66621e1d-8154-49a4-ba93-3d283aa92f40",
+        "total_cost_usd": 0.07556355,
+        "usage": {"input_tokens": 4, "output_tokens": 215},
+        "structured_output": {
+            "tasks": [
+                {
+                    "id": "task-1",
+                    "title": "Add hello.txt file",
+                    "spec": "Create hello.txt containing 'hello'.",
+                    "branch": "task/add-hello-txt",
+                    "depends_on": [],
+                }
+            ]
+        },
+    }
+    fields = _extract_result_fields(payload)
+    assert fields["is_error"] is False
+    assert fields["session_id"] == "66621e1d-8154-49a4-ba93-3d283aa92f40"
+    assert fields["total_cost_usd"] == 0.07556355
+    assert fields["structured"] == payload["structured_output"]

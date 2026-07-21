@@ -36,12 +36,12 @@ class AppServices:
 def build_services(settings: Settings) -> AppServices:
     settings.ensure_dirs()
     db = init_db(settings.db_path)
-    worktrees = WorktreeManager(settings.repo_root, settings.worktrees_dir, base_branch="main")
+    worktrees = WorktreeManager(settings.repo_root, settings.worktrees_dir, base_branch=settings.base_branch)
     artifacts = ArtifactStore(db)
     approvals = ApprovalBroker(db)
     outcomes = OutcomesStore(db)
     cost = CostTracker(db)
-    merge_queue = MergeQueue(worktrees, base_branch="main", test_command=None)
+    merge_queue = MergeQueue(worktrees, base_branch=settings.base_branch, test_command=None)
     scheduler = Scheduler(
         db=db,
         worktrees=worktrees,
@@ -51,7 +51,7 @@ def build_services(settings: Settings) -> AppServices:
         cost=cost,
         merge_queue=merge_queue,
         claude_bin=settings.claude_bin,
-        base_branch="main",
+        base_branch=settings.base_branch,
     )
     sessions = SessionManager(db, worktrees)
     return AppServices(

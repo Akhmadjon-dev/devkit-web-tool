@@ -42,6 +42,11 @@ PLANNER_ROLE = RoleConfig(
         "then respond with ONLY a JSON object matching the required schema describing the "
         "task breakdown. Each task's `spec` must be self-contained: the Engineer agent that "
         "receives it will have no memory of this conversation and no other context. "
+        "Critically: each task runs in its OWN separate git worktree with its OWN separate "
+        "working directory, not the one you are reading the repo from right now - NEVER "
+        "include your current working directory or any other absolute filesystem path in a "
+        "spec. Describe file locations only relative to the repository root (e.g. "
+        "'create hello.txt at the repo root', not '/some/absolute/path/hello.txt'). "
         "Do not edit any files."
     ),
     output_format="json",
@@ -146,6 +151,13 @@ def _extract_result_fields(payload: dict[str, Any]) -> dict[str, Any]:
                 structured = None
     else:
         result_text = str(raw_result)
+
+    # When --json-schema is used, the validated object lands in its own
+    # `structured_output` field - `result` is often left empty alongside it.
+    if "structured_output" in payload:
+        structured = payload["structured_output"]
+        if not result_text:
+            result_text = json.dumps(structured)
 
     return {
         "session_id": payload.get("session_id"),

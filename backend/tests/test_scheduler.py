@@ -68,6 +68,64 @@ async def fake_run_claude(
     raise AssertionError(f"unexpected role passed to fake_run_claude: {role}")
 
 
+async def fake_run_claude_engineer_forgets_to_commit(
+    prompt, *, cwd, role, claude_bin="claude", max_budget_usd=None, add_dirs=None,
+    resume_session_id=None, timeout_seconds=None, on_event=None,
+):
+    """Same as fake_run_claude, except the engineer writes the file but never
+    runs git add/commit - reproducing what a real Claude Code engineer agent
+    did the first time this pipeline ran end to end against the live CLI: the
+    diff came back empty and the "merge" silently did nothing, because nothing
+    was ever committed for git to move. ensure_committed() is the fix.
+    """
+    if role is ENGINEER_ROLE:
+        (Path(cwd) / "hello.txt").write_text("hi\n")
+        return make_result(structured=None, ok=True)
+    return await fake_run_claude(
+        prompt, cwd=cwd, role=role, claude_bin=claude_bin, max_budget_usd=max_budget_usd,
+        add_dirs=add_dirs, resume_session_id=resume_session_id, timeout_seconds=timeout_seconds, on_event=on_event,
+    )
+
+
+@pytest.mark.asyncio
+async def test_pipeline_commits_engineer_work_even_if_agent_forgets(services, repo, monkeypatch):
+    monkeypatch.setattr(scheduler_module, "run_claude", fake_run_claude_engineer_forgets_to_commit)
+
+    session = await services.sessions.create("add hello file")
+    _, plan_approval_id = await services.scheduler.submit_request(session, "please add a hello file")
+    plan, id_map = await services.scheduler.resolve_plan(session, plan_approval_id, approved=True)
+    task_id = id_map["t1"]
+
+    runner = asyncio.create_task(services.scheduler.run_all_tasks(session, plan, id_map))
+
+    approval_row = None
+    for _ in range(1000):
+        approval_row = services.db.fetch_one(
+            "SELECT * FROM approvals WHERE task_id = ? AND step_kind = 'task' AND status = 'pending'",
+            (task_id,),
+        )
+        if approval_row:
+            break
+        await asyncio.sleep(0.01)
+    assert approval_row is not None
+
+    # The diff gate must show the change even though the agent never committed.
+    diff_artifact = services.artifacts.get(approval_row["payload_ref"])
+    assert "hello.txt" in diff_artifact["body"]["patch"]
+    assert diff_artifact["body"]["files_changed"] >= 1
+
+    await services.approvals.resolve(approval_row["id"], ApprovalStatus.approved)
+    await runner
+
+    final = services.db.fetch_one("SELECT * FROM tasks WHERE id = ?", (task_id,))
+    assert final["status"] == "done"
+
+    log = await run_git("log", "--oneline", "main", cwd=repo)
+    assert "hello" in log.lower()
+    content = await run_git("show", "main:hello.txt", cwd=repo)
+    assert content.strip() == "hi"
+
+
 @pytest.mark.asyncio
 async def test_full_pipeline_plan_to_merge(services, repo, monkeypatch):
     monkeypatch.setattr(scheduler_module, "run_claude", fake_run_claude)

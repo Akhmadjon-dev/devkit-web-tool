@@ -8,6 +8,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.config import get_settings
+from app.core.scheduler import SchedulerError
+from app.core.worktrees import WorktreeError
 from app.services import build_services
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -40,7 +42,9 @@ def create_app() -> FastAPI:
 
     @app.middleware("http")
     async def local_token_auth(request: Request, call_next):
-        if request.url.path in OPEN_PATHS:
+        if request.method == "OPTIONS" or request.url.path in OPEN_PATHS:
+            # CORS preflight requests never carry our Authorization header (and
+            # carry no credentials at all) - let CORSMiddleware answer them.
             return await call_next(request)
         supplied = request.headers.get("authorization", "")
         supplied = supplied.removeprefix("Bearer ").strip()
@@ -49,6 +53,18 @@ def create_app() -> FastAPI:
         if supplied != token:
             return JSONResponse({"detail": "unauthorized"}, status_code=401)
         return await call_next(request)
+
+    @app.exception_handler(WorktreeError)
+    async def worktree_error_handler(request: Request, exc: WorktreeError) -> JSONResponse:
+        # Most common cause: base_branch doesn't exist in this repo (e.g. it
+        # uses "master", not "main" - see DEVWORKSPACE_BASE_BRANCH).
+        logger.warning("worktree error: %s", exc)
+        return JSONResponse({"detail": str(exc)}, status_code=400)
+
+    @app.exception_handler(SchedulerError)
+    async def scheduler_error_handler(request: Request, exc: SchedulerError) -> JSONResponse:
+        logger.warning("scheduler error: %s", exc)
+        return JSONResponse({"detail": str(exc)}, status_code=400)
 
     @app.get("/healthz")
     async def healthz() -> dict:

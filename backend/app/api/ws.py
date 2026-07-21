@@ -28,13 +28,23 @@ async def _authorized(ws: WebSocket) -> bool:
 
 
 async def _pump(ws: WebSocket, topic: str) -> None:
+    """Forward bus events to the socket until the client disconnects.
+
+    We only ever send here (never receive), so Starlette's normal
+    WebSocketDisconnect detection - which relies on receiving a disconnect
+    message - doesn't fire. A closed client instead surfaces as a raw
+    transport error out of send_json, which we treat the same way.
+    """
     queue = bus.subscribe(topic)
     try:
         while True:
             event = await queue.get()
-            await ws.send_json(event)
-    except WebSocketDisconnect:
-        pass
+            try:
+                await ws.send_json(event)
+            except (WebSocketDisconnect, RuntimeError):
+                break
+    except asyncio.CancelledError:
+        raise
     finally:
         bus.unsubscribe(topic, queue)
 

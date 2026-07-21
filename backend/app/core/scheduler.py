@@ -14,7 +14,7 @@ from app.core.llm_meta import CostTracker
 from app.core.merge import MergeQueue
 from app.core.outcomes import OutcomesStore
 from app.core.session_manager import Session
-from app.core.worktrees import WorktreeManager, capture_diff
+from app.core.worktrees import WorktreeError, WorktreeManager, capture_diff, ensure_committed
 from app.db import Database
 from app.models import ApprovalStatus, FailureClass, Plan, PlanTask, Review, TaskStatus
 
@@ -171,7 +171,11 @@ class Scheduler:
             if not ready:
                 raise SchedulerError("unsatisfiable or circular depends_on in plan")
             for rt in ready:
-                await self.run_task(session, rt)
+                try:
+                    await self.run_task(session, rt)
+                except Exception as e:  # noqa: BLE001 - a bug in one task must not kill the whole pipeline
+                    logger.exception("unexpected error running task %s", rt.id)
+                    await self._escalate(session, rt.id, FailureClass.escalated, f"unexpected error: {e}")
                 del remaining[rt.id]
                 row = self.db.fetch_one("SELECT status FROM tasks WHERE id = ?", (rt.id,))
                 if row is not None and row["status"] == TaskStatus.done.value:
@@ -195,7 +199,15 @@ class Scheduler:
         await self._set_task_status(task_id, TaskStatus.running)
         bus.publish(f"session:{session.id}", {"event": "task_running", "task_id": task_id, "title": plan_task.title})
 
-        wt = await self.worktrees.create(task_id, plan_task.branch, base=self.base_branch)
+        # Namespace with our own (guaranteed-unique) task id rather than trusting
+        # the Planner's suggested branch name verbatim - two tasks (or a task and
+        # its own session) can otherwise collide on the same branch name.
+        unique_branch = f"{plan_task.branch}-{task_id.rsplit('_', 1)[-1]}"
+        try:
+            wt = await self.worktrees.create(task_id, unique_branch, base=self.base_branch)
+        except WorktreeError as e:
+            await self._escalate(session, task_id, FailureClass.escalated, f"could not create worktree: {e}")
+            return
         await self.db.execute(
             "UPDATE tasks SET worktree_path = ?, branch = ? WHERE id = ?", (str(wt.path), wt.branch, task_id)
         )
@@ -222,6 +234,10 @@ class Scheduler:
         if not result.ok:
             await self._escalate(session, task_id, FailureClass.escalated, result.error_detail or "engineer run failed")
             return
+
+        # Don't trust the agent to have remembered to commit - an uncommitted
+        # change is invisible to the merge step and to `git diff` for new files.
+        await ensure_committed(wt.path, f"{plan_task.title}\n\n{plan_task.spec}")
 
         diff_body = await capture_diff(wt.path, base=self.base_branch)
         diff_artifact_id = await self.artifacts.save(kind="diff", session_id=session.id, task_id=task_id, body=diff_body)

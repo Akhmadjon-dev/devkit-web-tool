@@ -130,12 +130,31 @@ class WorktreeManager:
         return None
 
 
+async def ensure_committed(worktree_path: Path, message: str) -> bool:
+    """Commit any outstanding work (staged, unstaged, or untracked) in this
+    worktree. Agents don't reliably remember to `git commit` - relying on that
+    would make the diff gate and the merge step both silently see nothing, as
+    if no work happened at all. The deterministic layer, not the agent,
+    guarantees the work is actually captured. Returns True if a commit was made.
+    """
+    status = await run_git("status", "--porcelain", cwd=worktree_path)
+    if not status.strip():
+        return False
+    await run_git("add", "-A", cwd=worktree_path)
+    await run_git("commit", "-m", message, cwd=worktree_path)
+    return True
+
+
 async def capture_diff(worktree_path: Path, base: str = "main") -> dict:
     """Diff of everything committed on this worktree's branch since it diverged
-    from `base`, plus uncommitted changes. Returns raw ingredients for a Diff artifact.
+    from `base`, plus any still-uncommitted changes. Returns raw ingredients
+    for a Diff artifact. `git diff` alone never shows untracked new files, so
+    we also add (without committing) to catch those - `--` scoping keeps this
+    from accidentally picking up unrelated concurrent changes outside git's view.
     """
+    await run_git("add", "-A", "--", ".", cwd=worktree_path)
     patch = await run_git("diff", f"{base}...HEAD", cwd=worktree_path)
-    uncommitted = await run_git("diff", "HEAD", cwd=worktree_path)
+    uncommitted = await run_git("diff", "--cached", cwd=worktree_path)
     full_patch = patch + uncommitted
     stat = await run_git("diff", "--stat", f"{base}...HEAD", cwd=worktree_path)
     files_changed = max(0, len(stat.strip().splitlines()) - 1) if stat.strip() else 0
