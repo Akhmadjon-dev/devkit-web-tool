@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from app.bus import bus
 from app.core.executor import ClaudeRunResult
 from app.core.ids import new_id
 from app.db import Database
@@ -23,6 +24,10 @@ class CostTracker:
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (new_id("tr"), session_id, task_id, event, tokens, result.total_cost_usd, latency_ms or result.duration_ms),
         )
+        bus.publish("cost", {
+            "event": "trace", "session_id": session_id, "task_id": task_id,
+            "cost": result.total_cost_usd, "total": self.total_cost(),
+        })
 
     def session_cost(self, session_id: str) -> float:
         row = self.db.fetch_one(

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import logging
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.config import get_settings
@@ -12,6 +14,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 logger = logging.getLogger("devworkspace")
 
 OPEN_PATHS = {"/healthz"}
+FRONTEND_DEV_PORT = 5173
 
 
 def create_app() -> FastAPI:
@@ -19,7 +22,21 @@ def create_app() -> FastAPI:
     settings.ensure_dirs()
     token = settings.resolve_token()
 
-    app = FastAPI(title="DevWorkspace", version="0.1.0")
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        app.state.services = build_services(settings)
+        logger.info("devworkspace ready on %s:%s (repo=%s)", settings.host, settings.port, settings.repo_root)
+        logger.info("open the app: http://localhost:%s/?token=%s", FRONTEND_DEV_PORT, token)
+        yield
+
+    app = FastAPI(title="DevWorkspace", version="0.1.0", lifespan=lifespan)
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=[f"http://localhost:{FRONTEND_DEV_PORT}", f"http://127.0.0.1:{FRONTEND_DEV_PORT}"],
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
     @app.middleware("http")
     async def local_token_auth(request: Request, call_next):
@@ -33,19 +50,15 @@ def create_app() -> FastAPI:
             return JSONResponse({"detail": "unauthorized"}, status_code=401)
         return await call_next(request)
 
-    @app.on_event("startup")
-    async def on_startup() -> None:
-        app.state.services = build_services(settings)
-        logger.info("devworkspace ready on %s:%s (repo=%s)", settings.host, settings.port, settings.repo_root)
-        logger.info("auth token (data_dir/token): %s", settings.token_file)
-
     @app.get("/healthz")
     async def healthz() -> dict:
         return {"status": "ok"}
 
     from app.api.rest import router as rest_router
+    from app.api.ws import router as ws_router
 
     app.include_router(rest_router)
+    app.include_router(ws_router)
 
     return app
 
