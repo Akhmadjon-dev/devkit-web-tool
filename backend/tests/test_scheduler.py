@@ -469,3 +469,54 @@ async def test_planner_and_engineer_prompts_include_relevant_note(services, repo
 
     engineer_prompt = next(p for p in seen_prompts if "create report.csv" in p)
     assert "report.csv, never export.csv" in engineer_prompt
+
+
+@pytest.mark.asyncio
+async def test_budget_cap_blocks_planner_without_spending_more(tmp_path, repo, monkeypatch):
+    from app.config import Settings
+    from app.services import build_services
+    from app.core.scheduler import BudgetExceededError
+
+    settings = Settings(repo_root=repo, data_dir=tmp_path / "data", token="test-token", default_budget_usd=0.0)
+    services = build_services(settings)
+
+    called = False
+
+    async def fake_run_claude_should_never_be_called(*args, **kwargs):
+        nonlocal called
+        called = True
+        return make_result(structured={"tasks": []})
+
+    monkeypatch.setattr(scheduler_module, "run_claude", fake_run_claude_should_never_be_called)
+
+    session = await services.sessions.create("over budget from the start")
+    with pytest.raises(BudgetExceededError):
+        await services.scheduler.submit_request(session, "do anything")
+
+    assert called is False, "budget=0 must block before spending a single API call"
+
+
+@pytest.mark.asyncio
+async def test_budget_cap_escalates_task_instead_of_running_engineer(tmp_path, repo, monkeypatch):
+    from app.config import Settings
+    from app.services import build_services
+
+    # make_result() always reports total_cost_usd=0.001. A budget equal to
+    # exactly one call's cost lets the planner run (spent=0 < budget when it
+    # starts) but blocks the engineer step once spent (0.001) >= budget.
+    settings = Settings(repo_root=repo, data_dir=tmp_path / "data", token="test-token", default_budget_usd=0.001)
+    services = build_services(settings)
+
+    monkeypatch.setattr(scheduler_module, "run_claude", fake_run_claude)
+
+    session = await services.sessions.create("tight budget")
+    _, plan_approval_id = await services.scheduler.submit_request(session, "please add a hello file")
+    plan, id_map = await services.scheduler.resolve_plan(session, plan_approval_id, approved=True)
+    task_id = id_map["t1"]
+
+    await services.scheduler.run_all_tasks(session, plan, id_map)
+
+    final = services.db.fetch_one("SELECT status FROM tasks WHERE id = ?", (task_id,))
+    assert final["status"] == "escalated"
+    outcomes = services.outcomes.for_session(session.id)
+    assert any("budget" in o["raw_reason"].lower() for o in outcomes)

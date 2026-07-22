@@ -159,3 +159,35 @@ async def test_killing_session_cancels_in_flight_planner_call(client: httpx.Asyn
 
     r = await client.get("/api/approvals", headers=AUTH)
     assert all(a["session_id"] != session_id for a in r.json())
+
+
+@pytest.mark.asyncio
+async def test_rejected_task_surfaces_reason_in_session_and_task_detail(client: httpx.AsyncClient):
+    r = await client.post("/api/sessions", json={"title": "reject me"}, headers=AUTH)
+    session_id = r.json()["id"]
+    await client.post(f"/api/sessions/{session_id}/request", json={"text": "add hello file"}, headers=AUTH)
+    plan_approval = await _wait_for_pending(client, "plan")
+    await client.post(f"/api/approvals/{plan_approval['id']}/decision", json={"approved": True}, headers=AUTH)
+
+    task_approval = await _wait_for_pending(client, "task")
+    r = await client.post(
+        f"/api/approvals/{task_approval['id']}/decision",
+        json={"approved": False, "reason": "not what I asked for"},
+        headers=AUTH,
+    )
+    assert r.status_code == 200
+
+    task_id = None
+    for _ in range(500):
+        r = await client.get(f"/api/sessions/{session_id}", headers=AUTH)
+        tasks = r.json()["tasks"]
+        if tasks and tasks[0]["status"] == "rejected":
+            task_id = tasks[0]["id"]
+            assert tasks[0]["outcome_reason"] == "not what I asked for"
+            assert tasks[0]["failure_class"] == "human_rejected"
+            break
+        await asyncio.sleep(0.01)
+    assert task_id is not None, "task never reached rejected status"
+
+    r = await client.get(f"/api/tasks/{task_id}", headers=AUTH)
+    assert r.json()["outcome_reason"] == "not what I asked for"

@@ -53,6 +53,21 @@ async def list_sessions(request: Request) -> list[dict]:
     ]
 
 
+def _attach_latest_outcome(services: AppServices, task_row: dict) -> dict:
+    """Escalated/rejected tasks are useless in the UI without *why* - attach
+    the most recent outcome reason so the human doesn't have to go digging.
+    """
+    if task_row["status"] not in ("escalated", "rejected"):
+        return task_row
+    outcome = services.db.fetch_one(
+        "SELECT * FROM outcomes WHERE task_id = ? ORDER BY created_at DESC LIMIT 1", (task_row["id"],)
+    )
+    if outcome is not None:
+        task_row["outcome_reason"] = outcome["raw_reason"]
+        task_row["failure_class"] = outcome["failure_class"]
+    return task_row
+
+
 @router.get("/sessions/{session_id}")
 async def get_session(session_id: str, request: Request) -> dict:
     services = _services(request)
@@ -63,7 +78,7 @@ async def get_session(session_id: str, request: Request) -> dict:
     return {
         "id": session.id, "title": session.title, "branch": session.branch,
         "worktree_path": session.worktree_path, "status": session.status.value,
-        "tasks": [dict(t) for t in tasks],
+        "tasks": [_attach_latest_outcome(services, dict(t)) for t in tasks],
         "cost": services.cost.session_cost(session_id),
     }
 
@@ -130,7 +145,7 @@ async def get_task(task_id: str, request: Request) -> dict:
     row = services.db.fetch_one("SELECT * FROM tasks WHERE id = ?", (task_id,))
     if row is None:
         raise HTTPException(404, "task not found")
-    return {**dict(row), "artifacts": services.artifacts.for_task(task_id)}
+    return {**_attach_latest_outcome(services, dict(row)), "artifacts": services.artifacts.for_task(task_id)}
 
 
 # -- Approvals ---------------------------------------------------------------

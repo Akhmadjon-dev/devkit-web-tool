@@ -34,6 +34,9 @@ export interface Task {
   depends_on: string;
   created_at: string;
   artifacts?: Artifact[];
+  // present only when status is "escalated" or "rejected"
+  outcome_reason?: string;
+  failure_class?: "review_rejected" | "test_failed" | "human_rejected" | "escalated";
 }
 
 export interface Artifact {

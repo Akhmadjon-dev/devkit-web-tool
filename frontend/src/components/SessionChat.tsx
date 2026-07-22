@@ -144,9 +144,20 @@ export function SessionChat({ sessionId, onClosed }: { sessionId: string; onClos
         {session.tasks && session.tasks.length > 0 && (
           <div className="space-y-1.5 mb-2">
             {session.tasks.map((t) => (
-              <div key={t.id} className="flex items-center gap-2 text-xs">
-                <TaskStatusBadge status={t.status} />
-                <span className="text-gray-300">{t.title}</span>
+              <div key={t.id}>
+                <div className="flex items-center gap-2 text-xs">
+                  <TaskStatusBadge status={t.status} />
+                  <span className="text-gray-300">{t.title}</span>
+                </div>
+                {t.outcome_reason && (
+                  <div className="mt-1 ml-1 rounded border border-orange-700/40 bg-orange-500/5 px-2 py-1.5 text-[11px] text-orange-300">
+                    <span className="font-medium">
+                      {t.status === "escalated" ? "Escalated" : "Rejected"}
+                      {t.failure_class ? ` (${t.failure_class.replace(/_/g, " ")})` : ""}:
+                    </span>{" "}
+                    {t.outcome_reason}
+                  </div>
+                )}
               </div>
             ))}
           </div>

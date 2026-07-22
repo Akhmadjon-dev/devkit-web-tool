@@ -59,6 +59,7 @@ def build_services(settings: Settings) -> AppServices:
         claude_bin=settings.claude_bin,
         base_branch=settings.base_branch,
         max_agents=settings.max_agents,
+        default_budget_usd=settings.default_budget_usd,
     )
     sessions = SessionManager(db, worktrees)
     task_registry = TaskRegistry()

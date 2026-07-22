@@ -29,6 +29,10 @@ class SchedulerError(RuntimeError):
     pass
 
 
+class BudgetExceededError(SchedulerError):
+    pass
+
+
 @dataclass
 class ResolvedTask:
     id: str
@@ -55,6 +59,7 @@ class Scheduler:
         claude_bin: str = "claude",
         base_branch: str = "main",
         max_agents: int = 3,
+        default_budget_usd: float | None = None,
     ):
         self.db = db
         self.worktrees = worktrees
@@ -66,6 +71,7 @@ class Scheduler:
         self.notes = notes
         self.claude_bin = claude_bin
         self.base_branch = base_branch
+        self.default_budget_usd = default_budget_usd
         # Caps concurrent `claude` subprocesses across ALL sessions and tasks
         # in this process - parallelism is safe (each gets its own worktree)
         # but unbounded parallelism just burns cost/API rate limits for no
@@ -76,12 +82,27 @@ class Scheduler:
         async with self._agent_semaphore:
             return await run_claude(*args, **kwargs)
 
+    def _check_budget(self, session: Session) -> None:
+        """Breach pauses and asks - no silent spend. Checked before every
+        planner/engineer call; a human has to explicitly notice and act
+        (there's no auto-raise) before more money gets spent on this session.
+        """
+        if self.default_budget_usd is None:
+            return
+        spent = self.cost.session_cost(session.id)
+        if spent >= self.default_budget_usd:
+            raise BudgetExceededError(
+                f"session budget of ${self.default_budget_usd:.2f} reached (spent ${spent:.2f} so far) - "
+                "no further agent calls will run for this session until the budget is raised"
+            )
+
     # -- Planner step + gate 1 -------------------------------------------
 
     async def submit_request(self, session: Session, request_text: str) -> tuple[str, str]:
         """Runs the Planner, persists a Plan artifact, opens the gate-1 approval.
         Returns (artifact_id, approval_id). Does not block on the human.
         """
+        self._check_budget(session)
         context = await build_context(Path(session.worktree_path), self.notes, request_text)
         prompt = f"User request for this repo:\n\n{request_text}\n\n"
         if context:
@@ -221,6 +242,11 @@ class Scheduler:
     async def run_task(self, session: Session, rt: ResolvedTask) -> None:
         task_id = rt.id
         plan_task = rt.plan_task
+        try:
+            self._check_budget(session)
+        except BudgetExceededError as e:
+            await self._escalate(session, task_id, FailureClass.escalated, str(e))
+            return
         await self._set_task_status(task_id, TaskStatus.running)
         bus.publish(f"session:{session.id}", {"event": "task_running", "task_id": task_id, "title": plan_task.title})
 
