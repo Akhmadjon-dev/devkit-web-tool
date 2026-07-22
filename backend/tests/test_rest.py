@@ -103,6 +103,27 @@ async def test_full_flow_via_rest(client: httpx.AsyncClient):
 
 
 @pytest.mark.asyncio
+async def test_notes_crud(client: httpx.AsyncClient):
+    r = await client.get("/api/notes", headers=AUTH)
+    assert r.json() == []
+
+    r = await client.post("/api/notes", json={"text": "use snake_case", "kind": "convention"}, headers=AUTH)
+    assert r.status_code == 200
+    note_id = r.json()["id"]
+
+    r = await client.get("/api/notes", headers=AUTH)
+    notes = r.json()
+    assert len(notes) == 1
+    assert notes[0]["text"] == "use snake_case"
+
+    r = await client.delete(f"/api/notes/{note_id}", headers=AUTH)
+    assert r.status_code == 200
+
+    r = await client.get("/api/notes", headers=AUTH)
+    assert r.json() == []
+
+
+@pytest.mark.asyncio
 async def test_killing_session_cancels_in_flight_planner_call(client: httpx.AsyncClient, monkeypatch):
     """Closing a session must actually stop in-flight agent work, not just
     relabel it - otherwise a killed session leaves an orphaned claude

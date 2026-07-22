@@ -102,3 +102,10 @@ export interface WorktreeRow {
   session_id: string | null;
   status: "active" | "removed";
 }
+
+export interface Note {
+  id: string;
+  kind: string | null;
+  text: string;
+  created_at: string;
+}

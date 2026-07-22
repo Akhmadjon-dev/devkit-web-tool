@@ -33,6 +33,7 @@ class RoleConfig:
     append_system_prompt: str | None = None
     output_format: str = "json"  # "json" (single result) or "stream-json" (live events)
     json_schema: dict[str, Any] | None = None
+    timeout_seconds: float = 1800
 
 
 PLANNER_ROLE = RoleConfig(
@@ -52,6 +53,10 @@ PLANNER_ROLE = RoleConfig(
     ),
     output_format="json",
     json_schema=Plan.model_json_schema(),
+    # Bounded reasoning over a read-only repo exploration - should be fast.
+    # A real run once hung well past this; better to fail fast and let the
+    # human retry than sit at the 30-minute default not knowing anything's wrong.
+    timeout_seconds=300,
 )
 
 ENGINEER_ROLE = RoleConfig(
@@ -62,6 +67,9 @@ ENGINEER_ROLE = RoleConfig(
         "your work with git. Nothing you do here reaches main until a human approves the diff."
     ),
     output_format="stream-json",
+    # Real implementation work can legitimately take a while - longer leash
+    # than planner/reviewer, but still bounded well under the old 30-minute default.
+    timeout_seconds=1200,
 )
 
 REVIEWER_ROLE = RoleConfig(
@@ -75,6 +83,7 @@ REVIEWER_ROLE = RoleConfig(
     ),
     output_format="json",
     json_schema=Review.model_json_schema(),
+    timeout_seconds=300,
 )
 
 
@@ -181,16 +190,22 @@ async def run_claude(
     max_budget_usd: float | None = None,
     add_dirs: list[str] | None = None,
     resume_session_id: str | None = None,
-    timeout_seconds: float | None = 1800,
+    timeout_seconds: float | None = None,
     on_event: OnEvent | None = None,
 ) -> ClaudeRunResult:
     """Spawn one Claude Code agent, wait for it to finish, return its result.
+
+    timeout_seconds defaults to the role's own configured timeout - callers
+    only need to pass it explicitly to override (e.g. in tests).
 
     For role.output_format == "stream-json", on_event is invoked for every
     parsed JSON event line as it arrives (used to fan progress out to the
     bus/WebSocket in Phase 2). The function still blocks until the process
     exits and returns the aggregated result either way.
     """
+    if timeout_seconds is None:
+        timeout_seconds = role.timeout_seconds
+
     cmd = build_command(
         prompt,
         role,

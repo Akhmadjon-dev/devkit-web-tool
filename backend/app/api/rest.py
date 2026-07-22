@@ -181,6 +181,33 @@ async def decide_approval(approval_id: str, body: DecisionBody, request: Request
     return {"ok": True, "step_kind": "task"}
 
 
+# -- Notes (shared memory - conventions/decisions you write, retrieved   ----
+# -- read-only and non-LLM into Planner/Engineer prompts)                ----
+
+
+class CreateNoteRequest(BaseModel):
+    text: str
+    kind: str = "note"
+
+
+@router.get("/notes")
+async def list_notes(request: Request) -> list[dict]:
+    return _services(request).notes.list()
+
+
+@router.post("/notes")
+async def create_note(body: CreateNoteRequest, request: Request) -> dict:
+    services = _services(request)
+    note_id = await services.notes.add(body.kind, body.text)
+    return {"id": note_id}
+
+
+@router.delete("/notes/{note_id}")
+async def delete_note(note_id: str, request: Request) -> dict:
+    await _services(request).notes.delete(note_id)
+    return {"ok": True}
+
+
 # -- Cost ---------------------------------------------------------------
 
 

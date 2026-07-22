@@ -3,6 +3,7 @@ import type {
   Approval,
   Artifact,
   CostSummary,
+  Note,
   Plan,
   Session,
   Task,
@@ -79,6 +80,10 @@ export const api = {
   cost: () => apiFetch<CostSummary>("/api/cost"),
   worktrees: () => apiFetch<WorktreeRow[]>("/api/worktrees"),
   cleanupWorktrees: () => apiFetch<{ removed: string[] }>("/api/worktrees/cleanup", { method: "POST" }),
+  listNotes: () => apiFetch<Note[]>("/api/notes"),
+  createNote: (text: string, kind = "note") =>
+    apiFetch<{ id: string }>("/api/notes", { method: "POST", body: JSON.stringify({ text, kind }) }),
+  deleteNote: (id: string) => apiFetch<{ ok: boolean }>(`/api/notes/${id}`, { method: "DELETE" }),
 };
 
 export { ApiError };

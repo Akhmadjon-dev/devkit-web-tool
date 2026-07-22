@@ -7,6 +7,7 @@ from app.core.approvals import ApprovalBroker
 from app.core.artifacts import ArtifactStore
 from app.core.llm_meta import CostTracker
 from app.core.merge import MergeQueue
+from app.core.notes import NotesStore
 from app.core.outcomes import OutcomesStore
 from app.core.scheduler import Scheduler
 from app.core.session_manager import SessionManager
@@ -33,6 +34,7 @@ class AppServices:
     scheduler: Scheduler
     sessions: SessionManager
     task_registry: TaskRegistry
+    notes: NotesStore
 
 
 def build_services(settings: Settings) -> AppServices:
@@ -43,6 +45,7 @@ def build_services(settings: Settings) -> AppServices:
     approvals = ApprovalBroker(db)
     outcomes = OutcomesStore(db)
     cost = CostTracker(db)
+    notes = NotesStore(db)
     merge_queue = MergeQueue(worktrees, base_branch=settings.base_branch, test_command=None)
     scheduler = Scheduler(
         db=db,
@@ -52,6 +55,7 @@ def build_services(settings: Settings) -> AppServices:
         outcomes=outcomes,
         cost=cost,
         merge_queue=merge_queue,
+        notes=notes,
         claude_bin=settings.claude_bin,
         base_branch=settings.base_branch,
         max_agents=settings.max_agents,
@@ -61,5 +65,5 @@ def build_services(settings: Settings) -> AppServices:
     return AppServices(
         settings=settings, db=db, worktrees=worktrees, artifacts=artifacts, approvals=approvals,
         outcomes=outcomes, cost=cost, merge_queue=merge_queue, scheduler=scheduler, sessions=sessions,
-        task_registry=task_registry,
+        task_registry=task_registry, notes=notes,
     )

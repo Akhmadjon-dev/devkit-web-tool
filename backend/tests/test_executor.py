@@ -9,6 +9,15 @@ from app.core.executor import (
 )
 
 
+def test_role_timeouts_are_bounded_well_under_the_old_30min_default():
+    # A real planner call once hung for the full 30-minute default before we
+    # added per-role timeouts - planner/reviewer are bounded reasoning over a
+    # read-only repo and should fail fast, not sit for half an hour.
+    assert PLANNER_ROLE.timeout_seconds == 300
+    assert REVIEWER_ROLE.timeout_seconds == 300
+    assert ENGINEER_ROLE.timeout_seconds == 1200
+
+
 def test_build_command_json_role_has_no_verbose_flag():
     cmd = build_command("do the thing", PLANNER_ROLE, claude_bin="claude")
     assert cmd[0] == "claude"

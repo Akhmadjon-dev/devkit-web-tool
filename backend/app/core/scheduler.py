@@ -5,6 +5,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 from app.bus import bus
 from app.core.approvals import ApprovalBroker
@@ -12,7 +13,9 @@ from app.core.artifacts import ArtifactStore
 from app.core.executor import ENGINEER_ROLE, PLANNER_ROLE, REVIEWER_ROLE, ExecutorError, run_claude
 from app.core.ids import new_id
 from app.core.llm_meta import CostTracker
+from app.core.memory import build_context
 from app.core.merge import MergeQueue
+from app.core.notes import NotesStore
 from app.core.outcomes import OutcomesStore
 from app.core.session_manager import Session
 from app.core.worktrees import WorktreeError, WorktreeManager, capture_diff, ensure_committed
@@ -48,6 +51,7 @@ class Scheduler:
         outcomes: OutcomesStore,
         cost: CostTracker,
         merge_queue: MergeQueue,
+        notes: NotesStore,
         claude_bin: str = "claude",
         base_branch: str = "main",
         max_agents: int = 3,
@@ -59,6 +63,7 @@ class Scheduler:
         self.outcomes = outcomes
         self.cost = cost
         self.merge_queue = merge_queue
+        self.notes = notes
         self.claude_bin = claude_bin
         self.base_branch = base_branch
         # Caps concurrent `claude` subprocesses across ALL sessions and tasks
@@ -77,10 +82,12 @@ class Scheduler:
         """Runs the Planner, persists a Plan artifact, opens the gate-1 approval.
         Returns (artifact_id, approval_id). Does not block on the human.
         """
-        prompt = (
-            f"User request for this repo:\n\n{request_text}\n\n"
-            "Break this into a dependency-ordered list of engineer tasks."
-        )
+        context = await build_context(Path(session.worktree_path), self.notes, request_text)
+        prompt = f"User request for this repo:\n\n{request_text}\n\n"
+        if context:
+            prompt += f"{context}\n\n"
+        prompt += "Break this into a dependency-ordered list of engineer tasks."
+
         t0 = time.monotonic()
         try:
             result = await self._run_claude_limited(
@@ -238,10 +245,13 @@ class Scheduler:
         async def on_event(event: dict) -> None:
             bus.publish(f"session:{session.id}", {"event": "agent_event", "task_id": task_id, "payload": event})
 
+        context = await build_context(wt.path, self.notes, plan_task.spec)
+        engineer_prompt = plan_task.spec if not context else f"{plan_task.spec}\n\n{context}"
+
         t0 = time.monotonic()
         try:
             result = await self._run_claude_limited(
-                plan_task.spec, cwd=wt.path, role=ENGINEER_ROLE, claude_bin=self.claude_bin, on_event=on_event
+                engineer_prompt, cwd=wt.path, role=ENGINEER_ROLE, claude_bin=self.claude_bin, on_event=on_event
             )
         except ExecutorError as e:
             await self._escalate(session, task_id, FailureClass.escalated, f"engineer invocation failed: {e}")

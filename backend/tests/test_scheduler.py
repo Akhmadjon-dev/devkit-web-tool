@@ -408,3 +408,64 @@ async def test_two_parallel_orchestrator_sessions_both_merge_cleanly(services, r
     log = await run_git("log", "--oneline", "main", cwd=repo)
     assert "alpha.txt" in log
     assert "beta.txt" in log
+
+
+@pytest.mark.asyncio
+async def test_planner_and_engineer_prompts_include_relevant_note(services, repo, monkeypatch):
+    """Phase 4 checkpoint, at the plumbing level: a note you wrote actually
+    reaches the prompt the agent sees. (Whether the agent then visibly
+    follows it is an LLM-behavior question, verified separately against the
+    real CLI - this locks in that the context-injection wiring itself works.)
+    """
+    await services.notes.add("convention", "always name the export file report.csv, never export.csv")
+
+    seen_prompts: list[str] = []
+
+    async def fake_run_claude_captures_prompts(
+        prompt, *, cwd, role, claude_bin="claude", max_budget_usd=None, add_dirs=None,
+        resume_session_id=None, timeout_seconds=None, on_event=None,
+    ):
+        seen_prompts.append(prompt)
+        if role is PLANNER_ROLE:
+            plan = {
+                "tasks": [{
+                    "id": "t1", "title": "add export", "spec": "create report.csv",
+                    "role": "engineer", "branch": "feat/export", "depends_on": [],
+                }]
+            }
+            return make_result(structured=plan)
+        if role is ENGINEER_ROLE:
+            (Path(cwd) / "report.csv").write_text("x")
+            await run_git("add", "report.csv", cwd=Path(cwd))
+            await run_git("-c", "user.email=t@t.com", "-c", "user.name=t", "commit", "-q", "-m", "add export", cwd=Path(cwd))
+            return make_result(structured=None, ok=True)
+        if role is REVIEWER_ROLE:
+            return make_result(structured={"verdict": "approve", "issues": [], "notes": "ok"})
+        raise AssertionError(role)
+
+    monkeypatch.setattr(scheduler_module, "run_claude", fake_run_claude_captures_prompts)
+
+    session = await services.sessions.create("csv export")
+    _, plan_approval_id = await services.scheduler.submit_request(session, "add a csv export")
+
+    planner_prompt = seen_prompts[0]
+    assert "report.csv, never export.csv" in planner_prompt
+
+    plan, id_map = await services.scheduler.resolve_plan(session, plan_approval_id, approved=True)
+    task_id = id_map["t1"]
+    runner = asyncio.create_task(services.scheduler.run_all_tasks(session, plan, id_map))
+
+    for _ in range(1000):
+        row = services.db.fetch_one("SELECT status FROM tasks WHERE id = ?", (task_id,))
+        if row and row["status"] == "done":
+            break
+        await asyncio.sleep(0.01)
+        pending = services.db.fetch_one(
+            "SELECT * FROM approvals WHERE task_id = ? AND step_kind = 'task' AND status = 'pending'", (task_id,)
+        )
+        if pending:
+            await services.approvals.resolve(pending["id"], ApprovalStatus.approved)
+    await runner
+
+    engineer_prompt = next(p for p in seen_prompts if "create report.csv" in p)
+    assert "report.csv, never export.csv" in engineer_prompt

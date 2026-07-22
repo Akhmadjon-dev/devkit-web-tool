@@ -7,6 +7,7 @@ import { SessionChat } from "./components/SessionChat";
 import { ApprovalsQueue } from "./components/ApprovalsQueue";
 import { CostMeter } from "./components/CostMeter";
 import { WorktreesPanel } from "./components/WorktreesPanel";
+import { NotesPanel } from "./components/NotesPanel";
 
 function Shell() {
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -44,6 +45,7 @@ function Shell() {
         <aside className="w-80 shrink-0 space-y-3 overflow-y-auto p-3">
           <ApprovalsQueue onSelectSession={setActiveId} />
           <CostMeter />
+          <NotesPanel />
           <WorktreesPanel />
         </aside>
       </div>
